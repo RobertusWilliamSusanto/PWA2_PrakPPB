@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// In-Memory Query Cache with TTL & Pattern Invalidation
+// In-Memory Query Cache with Deterministic JSON Keys & Prefix Invalidation
 // ---------------------------------------------------------------------------
 
 class QueryCache {
@@ -8,26 +8,28 @@ class QueryCache {
   }
 
   /**
-   * Generate a normalized cache key
-   * @param {string} prefix - e.g. 'catalog', 'detail', 'reviews'
-   * @param {Object|string|number} params
+   * Generate a deterministic cache key matching user specification:
+   * guns:${JSON.stringify({page,limit,type,caliber,minPrice,maxPrice,q,sort,...})}
    */
-  generateKey(prefix, params = {}) {
+  generateKey(prefix = 'guns', params = {}) {
     if (typeof params === 'string' || typeof params === 'number') {
       return `${prefix}:${params}`
     }
-    // Normalize keys alphabetically for deterministic keys
+
+    // Sort keys alphabetically so order of insertion doesn't affect key
+    const normalized = {}
     const sortedKeys = Object.keys(params).sort()
-    const parts = sortedKeys
-      .filter((k) => params[k] !== undefined && params[k] !== null && params[k] !== '')
-      .map((k) => `${k}=${params[k]}`)
-    return `${prefix}:${parts.join('&')}`
+    for (const k of sortedKeys) {
+      if (params[k] !== undefined && params[k] !== null && params[k] !== '') {
+        normalized[k] = params[k]
+      }
+    }
+
+    return `${prefix}:${JSON.stringify(normalized)}`
   }
 
   /**
    * Retrieve cached value if not expired
-   * @param {string} key
-   * @returns {any|null}
    */
   get(key) {
     const entry = this.store.get(key)
@@ -43,9 +45,6 @@ class QueryCache {
 
   /**
    * Set cache entry with TTL (default 120s, clamped between 60 - 300s)
-   * @param {string} key
-   * @param {any} data
-   * @param {number} ttlSeconds
    */
   set(key, data, ttlSeconds = 120) {
     const effectiveTTL = Math.max(60, Math.min(300, ttlSeconds))
@@ -57,9 +56,7 @@ class QueryCache {
   }
 
   /**
-   * Invalidate by exact key or prefix pattern
-   * e.g. 'catalog', 'reviews'
-   * @param {string} prefixOrKey
+   * Invalidate by exact key or prefix pattern (e.g. 'guns:')
    */
   invalidate(prefixOrKey) {
     if (!prefixOrKey) {

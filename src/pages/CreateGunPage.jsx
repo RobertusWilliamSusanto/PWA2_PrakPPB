@@ -39,7 +39,7 @@ export default function CreateGunPage({ onBack, onSuccess }) {
     description: '',
     servings: 1,
     is_featured: false,
-    seller_phone: '081234567890',
+    seller_phone: '',
   })
 
   const [imagesList, setImagesList] = useState([])

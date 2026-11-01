@@ -43,7 +43,7 @@ export default function EditGunPage({ gun, gunId, onBack, onSuccess }) {
     description: '',
     servings: 1,
     is_featured: false,
-    seller_phone: '081234567890',
+    seller_phone: '',
   })
 
   const [imagesList, setImagesList] = useState([])
@@ -88,7 +88,7 @@ export default function EditGunPage({ gun, gunId, onBack, onSuccess }) {
             description: data.description || '',
             servings: data.servings || 1,
             is_featured: Boolean(data.is_featured),
-            seller_phone: data.seller_phone || '081234567890',
+            seller_phone: data.seller_phone || '',
           })
           const loadedImgs = Array.isArray(data.images) && data.images.length > 0
             ? data.images

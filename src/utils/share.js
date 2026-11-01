@@ -8,7 +8,10 @@
 export function getGunShareUrl(gun) {
   if (!gun) return ''
   const token = gun.share_token || `bb_${gun.id}`
-  const base = window.location.origin + window.location.pathname
+  const base =
+    typeof window !== 'undefined' && window.location
+      ? window.location.origin + window.location.pathname
+      : 'https://borebarrel.internal/'
   return `${base}?share=${encodeURIComponent(token)}`
 }
 

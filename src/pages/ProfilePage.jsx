@@ -208,7 +208,7 @@ export default function ProfilePage({
                   WhatsApp Penjual
                 </span>
                 <span className="text-stone-200 font-mono">
-                  {profile.phone || '0812-3456-7890'}
+                  {profile.phone || <em className="text-stone-500 font-sans">Belum diatur</em>}
                 </span>
                 <p className="text-xs text-stone-500 mt-0.5">
                   Tautan WhatsApp otomatis terintegrasi pada tombol &quot;Hubungi Penjual&quot;.

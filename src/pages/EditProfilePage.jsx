@@ -6,7 +6,7 @@ export default function EditProfilePage({ onBack, onSuccess }) {
   const [profile] = useState(() => userService.getUserProfile())
   const [username, setUsername] = useState(profile.username || 'Shooter')
   const [bio, setBio] = useState(profile.bio || '')
-  const [phone, setPhone] = useState(profile.phone || '081234567890')
+  const [phone, setPhone] = useState(profile.phone || '')
   const [avatar, setAvatar] = useState(profile.avatar || null)
   const [feedback, setFeedback] = useState('')
   const [error, setError] = useState('')

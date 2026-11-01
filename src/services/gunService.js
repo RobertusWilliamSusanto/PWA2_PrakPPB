@@ -1,6 +1,7 @@
-import { apiClient, IS_SUPABASE } from '../config/api'
-import { cache } from '../utils/cache'
-import { getUserIdentifier } from './userService'
+import { apiClient, IS_SUPABASE } from '../config/api.js'
+import { cache } from '../utils/cache.js'
+import { getUserIdentifier } from './userService.js'
+import { getSchemaStatus } from '../utils/schemaDetector.js'
 
 // ---------------------------------------------------------------------------
 // Share Token Generator (nanoid/UUID-based, unguessable)
@@ -88,23 +89,45 @@ export const normalizeProduct = (item) => {
     share_token: item.share_token || `bb_${String(item.id || 'gun')}`,
     deleted_at: item.deleted_at || null,
     status: item.status || (item.deleted_at ? 'archived' : 'active'),
-    seller_phone: item.seller_phone || item.contact_phone || '081234567890',
+    seller_phone: item.seller_phone || item.contact_phone || '', // NO FAKE NUMBER DEFAULT!
     user_id: item.user_id || null,
   }
 }
 
 // ---------------------------------------------------------------------------
-// GunService — wraps backend CRUD endpoints with soft-delete, pagination,
-// multi-images, share token lookup, and query caching with TTL.
+// GunService — wraps backend CRUD endpoints with soft-delete, server-side pagination,
+// multi-images, share token lookup, and deterministic query caching.
 // ---------------------------------------------------------------------------
 class GunService {
   /**
-   * Fetch a paginated, filterable list of active products with server-side pagination & cache.
+   * Fetch a paginated, filterable list of products with server-side pagination & cache.
+   * Uses Prefer: count=exact and reads Content-Range for accurate total count.
    */
   async getGuns(params = {}) {
     const page = Number(params.page) || 1
     const limit = Number(params.limit) || 12
-    const cacheKey = cache.generateKey('catalog:list', { ...params, page, limit })
+    const category = params.category || 'All'
+    const caliber = params.caliber || ''
+    const search = params.search || ''
+    const minPrice = params.minPrice || ''
+    const maxPrice = params.maxPrice || ''
+    const sortBy = params.sort_by || 'name'
+    const sortOrder = params.order || 'asc'
+    const archived = Boolean(params.archived)
+
+    // Deterministic cache key matching user requirement:
+    // guns:${JSON.stringify({page,limit,type,caliber,minPrice,maxPrice,q,sort,archived})}
+    const cacheKey = cache.generateKey('guns', {
+      page,
+      limit,
+      type: category,
+      caliber,
+      minPrice,
+      maxPrice,
+      q: search,
+      sort: `${sortBy}_${sortOrder}`,
+      archived,
+    })
 
     // Check cache
     const cached = cache.get(cacheKey)
@@ -113,64 +136,102 @@ class GunService {
     }
 
     if (IS_SUPABASE) {
-      try {
-        const queryParts = ['select=*']
+      const schema = getSchemaStatus()
+      const queryParts = ['select=*']
 
-        // Exclude soft-deleted items unless explicitly requested
-        if (params.archived) {
+      // Only filter deleted_at if the column actually exists in DB
+      if (schema.hasDeletedAt) {
+        if (archived) {
           queryParts.push('deleted_at=not.is.null')
         } else {
           queryParts.push('deleted_at=is.null')
         }
-
-        if (params.search) {
-          queryParts.push(`name=ilike.*${encodeURIComponent(params.search)}*`)
-        }
-
-        if (params.category && params.category !== 'All') {
-          queryParts.push(`type=eq.${encodeURIComponent(params.category)}`)
-        }
-
-        if (params.sort_by) {
-          const order = params.order === 'desc' ? 'desc' : 'asc'
-          queryParts.push(`order=${encodeURIComponent(params.sort_by)}.${order}`)
-        } else {
-          queryParts.push('order=created_at.desc')
-        }
-
-        // Count total matching items for server pagination
-        const countParts = [...queryParts.filter((p) => !p.startsWith('order='))]
-        const countData = await apiClient.get(`/rest/v1/products?${countParts.join('&')}`)
-        const total = Array.isArray(countData) ? countData.length : 0
-
-        // Server-side paging with limit & offset
-        const offset = (page - 1) * limit
-        queryParts.push(`limit=${limit}`)
-        queryParts.push(`offset=${offset}`)
-
-        const queryString = queryParts.join('&')
-        const data = await apiClient.get(`/rest/v1/products?${queryString}`)
-        const list = Array.isArray(data) ? data.map(normalizeProduct) : []
-
-        const result = {
+      } else if (archived) {
+        // Migration not yet applied; no archived items available in DB
+        return {
           success: true,
-          data: list,
+          data: [],
           pagination: {
-            total,
-            page,
+            total: 0,
+            page: 1,
             limit,
-            totalPages: Math.ceil(total / limit) || 1,
-            hasNextPage: page * limit < total,
-            hasPrevPage: page > 1,
+            totalPages: 1,
+            hasNextPage: false,
+            hasPrevPage: false,
           },
         }
-
-        // Cache for 120s
-        cache.set(cacheKey, result, 120)
-        return result
-      } catch (err) {
-        console.warn('[gunService] Supabase getGuns fallback:', err)
       }
+
+      if (search) {
+        queryParts.push(`name=ilike.*${encodeURIComponent(search)}*`)
+      }
+
+      if (category && category !== 'All') {
+        queryParts.push(`type=eq.${encodeURIComponent(category)}`)
+      }
+
+      if (caliber) {
+        queryParts.push(`caliber=eq.${encodeURIComponent(caliber)}`)
+      }
+
+      if (minPrice) {
+        queryParts.push(`price=gte.${Number(minPrice)}`)
+      }
+
+      if (maxPrice) {
+        queryParts.push(`price=lte.${Number(maxPrice)}`)
+      }
+
+      if (sortBy) {
+        const order = sortOrder === 'desc' ? 'desc' : 'asc'
+        queryParts.push(`order=${encodeURIComponent(sortBy)}.${order}`)
+      } else {
+        queryParts.push('order=created_at.desc')
+      }
+
+      // Server-side paging with limit & offset
+      const offset = (page - 1) * limit
+      queryParts.push(`limit=${limit}`)
+      queryParts.push(`offset=${offset}`)
+
+      const queryString = queryParts.join('&')
+
+      // SINGLE HTTP GET request with Prefer: count=exact and returnHeaders: true
+      const res = await apiClient.get(`/rest/v1/products?${queryString}`, {
+        headers: { Prefer: 'count=exact' },
+        returnHeaders: true,
+      })
+
+      // Parse total count from Content-Range header (e.g. "0-11/45")
+      const contentRange = res.headers?.['content-range'] || ''
+      let total = Array.isArray(res.data) ? res.data.length : 0
+      if (contentRange && contentRange.includes('/')) {
+        const totalStr = contentRange.split('/')[1]
+        if (totalStr && totalStr !== '*') {
+          const parsed = parseInt(totalStr, 10)
+          if (!isNaN(parsed)) total = parsed
+        }
+      }
+
+      const totalPages = Math.max(1, Math.ceil(total / limit))
+      const list = Array.isArray(res.data) ? res.data.map(normalizeProduct) : []
+
+      const result = {
+        success: true,
+        data: list,
+        pagination: {
+          total,
+          page,
+          limit,
+          totalPages,
+          hasNextPage: page < totalPages,
+          hasPrevPage: page > 1,
+        },
+      }
+
+      // Cache for 120s
+      cache.set(cacheKey, result, 120)
+      return result
     }
 
     // Fallback: university REST API or local
@@ -193,25 +254,36 @@ class GunService {
    * Fetch a single product by ID (including multi-images from catalog_images).
    */
   async getGunById(id) {
+    if (typeof id === 'string' && id.startsWith('local-')) {
+      const { GUNS_LOCAL } = await import('../data/guns.js')
+      const found = GUNS_LOCAL.find((g, idx) => String(g.id || `local-${idx}`) === String(id))
+      if (found) return { success: true, data: normalizeProduct(found) }
+      throw new Error('Hardware item not found.')
+    }
+
     const cacheKey = cache.generateKey('gun:detail', id)
     const cached = cache.get(cacheKey)
     if (cached) return cached
 
     if (IS_SUPABASE) {
+      const schema = getSchemaStatus()
       let data = null
-      try {
-        // Try to fetch product with relation
-        data = await apiClient.get(`/rest/v1/products?id=eq.${id}&select=*,catalog_images(*)`)
-      } catch {
-        // Fallback if relation not available
+
+      if (schema.hasCatalogImages) {
+        try {
+          data = await apiClient.get(`/rest/v1/products?id=eq.${id}&select=*,catalog_images(*)`)
+        } catch {
+          data = await apiClient.get(`/rest/v1/products?id=eq.${id}&select=*`)
+        }
+      } else {
         data = await apiClient.get(`/rest/v1/products?id=eq.${id}&select=*`)
       }
 
       if (Array.isArray(data) && data.length > 0) {
         const product = normalizeProduct(data[0])
 
-        // If images weren't joined, try fetching catalog_images separately
-        if (!product.images || product.images.length <= 1) {
+        // If images weren't joined and table exists, try fetching catalog_images separately
+        if (schema.hasCatalogImages && (!product.images || product.images.length <= 1)) {
           try {
             const imgData = await apiClient.get(
               `/rest/v1/catalog_images?catalog_id=eq.${id}&order=display_order.asc`,
@@ -221,8 +293,8 @@ class GunService {
               product.image_url = imgData[0].url
               product.image = imgData[0].url
             }
-          } catch {
-            /* ignore if catalog_images table does not exist */
+          } catch (e) {
+            console.warn('[gunService] Could not load catalog_images:', e.message)
           }
         }
 
@@ -248,14 +320,26 @@ class GunService {
     if (cached) return cached
 
     if (IS_SUPABASE) {
-      try {
-        let data = await apiClient.get(`/rest/v1/products?share_token=eq.${token}&select=*`)
-        if (Array.isArray(data) && data.length > 0) {
-          const item = data[0]
-          const isArchived = Boolean(item.deleted_at || item.status === 'archived')
-          const product = normalizeProduct(item)
+      const schema = getSchemaStatus()
+      let data = []
 
-          // Fetch multi-images if any
+      if (schema.hasShareToken) {
+        data = await apiClient.get(`/rest/v1/products?share_token=eq.${token}&select=*`)
+      } else {
+        // Fallback if share_token column not yet migrated
+        const rawId = token.startsWith('bb_') ? token.slice(3) : token
+        if (/^\d+$/.test(rawId)) {
+          data = await apiClient.get(`/rest/v1/products?id=eq.${rawId}&select=*`)
+        }
+      }
+
+      if (Array.isArray(data) && data.length > 0) {
+        const item = data[0]
+        const isArchived = Boolean(item.deleted_at || item.status === 'archived')
+        const product = normalizeProduct(item)
+
+        // Fetch multi-images if table exists
+        if (schema.hasCatalogImages) {
           try {
             const imgData = await apiClient.get(
               `/rest/v1/catalog_images?catalog_id=eq.${item.id}&order=display_order.asc`,
@@ -264,16 +348,14 @@ class GunService {
               product.images = imgData
               product.image_url = imgData[0].url
             }
-          } catch {
-            /* ignore */
+          } catch (e) {
+            console.warn('[gunService] Share image fetch fallback:', e.message)
           }
-
-          const res = { success: true, data: product, isArchived }
-          cache.set(cacheKey, res, 120)
-          return res
         }
-      } catch (err) {
-        console.warn('Share token lookup error:', err)
+
+        const res = { success: true, data: product, isArchived }
+        cache.set(cacheKey, res, 120)
+        return res
       }
     }
 
@@ -284,11 +366,11 @@ class GunService {
    * Create a new product.
    */
   async createGun(data) {
-    // Invalidate all catalog & detail caches
-    cache.invalidate('catalog:')
-    cache.invalidate('gun:')
+    // Invalidate all guns cache keys as required
+    cache.invalidate('guns')
 
     if (IS_SUPABASE) {
+      const schema = getSchemaStatus()
       const specsArray = Array.isArray(data.ingredients)
         ? data.ingredients.map((i) => `${i.name}: ${i.quantity}`)
         : Array.isArray(data.specs)
@@ -311,12 +393,14 @@ class GunService {
         description: data.description || '',
         specs: specsArray,
         image_url: primaryUrl,
-        share_token: shareToken,
-        status: data.status || 'active',
-        seller_phone: data.seller_phone || '081234567890',
-        user_id: data.user_id || getUserIdentifier(),
-        deleted_at: null,
       }
+
+      // Only include newly migrated columns if they exist in DB
+      if (schema.hasShareToken) payload.share_token = shareToken
+      if (schema.hasStatus) payload.status = data.status || 'active'
+      if (schema.hasSellerPhone && data.seller_phone) payload.seller_phone = data.seller_phone
+      if (schema.hasDeletedAt) payload.deleted_at = null
+      if (schema.hasUserId) payload.user_id = data.user_id || getUserIdentifier()
 
       const res = await apiClient.post('/rest/v1/products', payload, {
         headers: { Prefer: 'return=representation' },
@@ -324,7 +408,7 @@ class GunService {
       const created = Array.isArray(res) ? res[0] : res
 
       // Insert multi-images to catalog_images table if available
-      if (created?.id && Array.isArray(data.images) && data.images.length > 0) {
+      if (schema.hasCatalogImages && created?.id && Array.isArray(data.images) && data.images.length > 0) {
         try {
           const imageRows = data.images.map((img, idx) => ({
             catalog_id: created.id,
@@ -334,7 +418,7 @@ class GunService {
           }))
           await apiClient.post('/rest/v1/catalog_images', imageRows)
         } catch (imgErr) {
-          console.warn('Could not save multi-images to catalog_images:', imgErr)
+          console.warn('[gunService] Could not save to catalog_images:', imgErr.message)
         }
       }
 
@@ -348,10 +432,13 @@ class GunService {
    * Update existing product.
    */
   async updateGun(id, data) {
-    cache.invalidate('catalog:')
-    cache.invalidate('gun:')
+    if (typeof id === 'string' && id.startsWith('local-')) {
+      return { success: false, error: 'Local product cannot be modified on server' }
+    }
+    cache.invalidate('guns')
 
     if (IS_SUPABASE) {
+      const schema = getSchemaStatus()
       const specsArray = Array.isArray(data.ingredients)
         ? data.ingredients.map((i) => `${i.name}: ${i.quantity}`)
         : Array.isArray(data.specs)
@@ -369,8 +456,12 @@ class GunService {
       }
       if (data.description !== undefined) payload.description = data.description
       if (specsArray !== undefined) payload.specs = specsArray
-      if (data.seller_phone !== undefined) payload.seller_phone = data.seller_phone
-      if (data.status !== undefined) payload.status = data.status
+      if (schema.hasSellerPhone && data.seller_phone !== undefined) {
+        payload.seller_phone = data.seller_phone
+      }
+      if (schema.hasStatus && data.status !== undefined) {
+        payload.status = data.status
+      }
 
       if (Array.isArray(data.images) && data.images.length > 0) {
         const primaryUrl = typeof data.images[0] === 'string' ? data.images[0] : data.images[0].url
@@ -384,12 +475,10 @@ class GunService {
       })
       const updated = Array.isArray(res) ? res[0] : res
 
-      // Sync multi-images
-      if (Array.isArray(data.images)) {
+      // Sync multi-images if table exists
+      if (schema.hasCatalogImages && Array.isArray(data.images)) {
         try {
-          // Delete old image rows
           await apiClient.delete(`/rest/v1/catalog_images?catalog_id=eq.${id}`)
-          // Insert new image rows
           if (data.images.length > 0) {
             const imageRows = data.images.map((img, idx) => ({
               catalog_id: id,
@@ -400,7 +489,7 @@ class GunService {
             await apiClient.post('/rest/v1/catalog_images', imageRows)
           }
         } catch (imgErr) {
-          console.warn('Could not sync catalog_images:', imgErr)
+          console.warn('[gunService] Could not sync catalog_images:', imgErr.message)
         }
       }
 
@@ -414,20 +503,31 @@ class GunService {
    * Soft delete (archive) product.
    */
   async deleteGun(id) {
-    cache.invalidate('catalog:')
-    cache.invalidate('gun:')
+    if (typeof id === 'string' && id.startsWith('local-')) {
+      return { success: true, archived: true }
+    }
+    cache.invalidate('guns')
 
     if (IS_SUPABASE) {
-      // Soft delete: set deleted_at & status=archived
-      await apiClient.patch(
-        `/rest/v1/products?id=eq.${id}`,
-        {
-          deleted_at: new Date().toISOString(),
-          status: 'archived',
-        },
-        { headers: { Prefer: 'return=representation' } },
-      )
-      return { success: true, archived: true }
+      const schema = getSchemaStatus()
+      if (schema.hasDeletedAt) {
+        await apiClient.patch(
+          `/rest/v1/products?id=eq.${id}`,
+          {
+            deleted_at: new Date().toISOString(),
+            status: 'archived',
+          },
+          { headers: { Prefer: 'return=representation' } },
+        )
+        return { success: true, archived: true }
+      } else {
+        // Fallback if deleted_at column does not exist
+        console.warn(
+          '[gunService] Kolom deleted_at belum ada. Menghapus data permanen. Terapkan migration 20261101_combined_schema.sql untuk soft-delete.',
+        )
+        await apiClient.delete(`/rest/v1/products?id=eq.${id}`)
+        return { success: true, archived: false }
+      }
     }
 
     return apiClient.delete(`/api/v1/recipes/${id}`)
@@ -437,19 +537,24 @@ class GunService {
    * Restore archived product back to active catalog.
    */
   async restoreGun(id) {
-    cache.invalidate('catalog:')
-    cache.invalidate('gun:')
+    if (typeof id === 'string' && id.startsWith('local-')) {
+      return { success: true }
+    }
+    cache.invalidate('guns')
 
     if (IS_SUPABASE) {
-      await apiClient.patch(
-        `/rest/v1/products?id=eq.${id}`,
-        {
-          deleted_at: null,
-          status: 'active',
-          updated_at: new Date().toISOString(),
-        },
-        { headers: { Prefer: 'return=representation' } },
-      )
+      const schema = getSchemaStatus()
+      if (schema.hasDeletedAt) {
+        await apiClient.patch(
+          `/rest/v1/products?id=eq.${id}`,
+          {
+            deleted_at: null,
+            status: 'active',
+            updated_at: new Date().toISOString(),
+          },
+          { headers: { Prefer: 'return=representation' } },
+        )
+      }
       return { success: true }
     }
 
@@ -460,15 +565,19 @@ class GunService {
    * Permanently delete product from database.
    */
   async permanentDeleteGun(id) {
-    cache.invalidate('catalog:')
-    cache.invalidate('gun:')
+    if (typeof id === 'string' && id.startsWith('local-')) {
+      return { success: true }
+    }
+    cache.invalidate('guns')
 
     if (IS_SUPABASE) {
-      // Delete images first if table exists
-      try {
-        await apiClient.delete(`/rest/v1/catalog_images?catalog_id=eq.${id}`)
-      } catch {
-        /* ignore */
+      const schema = getSchemaStatus()
+      if (schema.hasCatalogImages) {
+        try {
+          await apiClient.delete(`/rest/v1/catalog_images?catalog_id=eq.${id}`)
+        } catch (e) {
+          console.warn('[gunService] catalog_images delete fallback:', e.message)
+        }
       }
       await apiClient.delete(`/rest/v1/products?id=eq.${id}`)
       return { success: true }

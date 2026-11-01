@@ -15,6 +15,7 @@ import GunCard from '../components/gun/GunCard'
 import GunDetail from '../components/gun/GunDetail'
 import AdvancedFilter from '../components/common/AdvancedFilter'
 import ConfirmModal from '../components/modals/ConfirmModal'
+import DevMigrationBanner from '../components/common/DevMigrationBanner'
 import gunService from '../services/gunService'
 import {
   matchesSearch,
@@ -37,7 +38,6 @@ export default function Catalog({ onNavigate }) {
   const [activeCategory, setActiveCategory] = useState(() => urlParams.get('category') || 'All')
   const [sortKey, setSortKey] = useState(() => urlParams.get('sort') || 'name')
   const [sortOrder, setSortOrder] = useState(() => urlParams.get('order') || 'asc')
-  const [useLocal, setUseLocal] = useState(false)
 
   // Sync state to URL query string so search/filter/page are retained
   useEffect(() => {
@@ -63,42 +63,63 @@ export default function Catalog({ onNavigate }) {
     order: sortOrder,
   })
 
-  // Fallback to local data if server is unreachable
-  const rawGuns = useMemo(() => {
-    if (useLocal || (error && apiGuns.length === 0)) {
-      return GUNS_LOCAL.map((g, i) => ({ ...g, id: g.id || `local-${i}` }))
-    }
-    return apiGuns
-  }, [apiGuns, error, useLocal])
+  // Fallback GUNS_LOCAL HANYA aktif saat network error
+  const isNetworkError = Boolean(
+    error &&
+      ((typeof navigator !== 'undefined' && !navigator.onLine) ||
+        error.toLowerCase().includes('network') ||
+        error.toLowerCase().includes('connection') ||
+        error.toLowerCase().includes('unable to reach')),
+  )
+  const isFallbackLocal = Boolean(isNetworkError && apiGuns.length === 0)
 
-  // Available categories
+  // Available categories extracted from local master list
   const categories = useMemo(() => {
     return extractCategories(GUNS_LOCAL)
   }, [])
 
-  // If using local data fallback, apply client-side filtering and slicing
+  // If server data is available, it is ALREADY filtered and paginated server-side.
+  // If in fallback mode, apply filtering, sorting, and pagination locally.
   const displayedGuns = useMemo(() => {
-    if (useLocal) {
-      let filtered = rawGuns.filter(
+    if (isFallbackLocal) {
+      const enrichedLocal = GUNS_LOCAL.map((g, i) => ({ ...g, id: g.id || `local-${i}` }))
+      let filtered = enrichedLocal.filter(
         (g) => matchesSearch(g, search) && matchesCategory(g, activeCategory),
       )
       filtered = sortItems(filtered, sortKey, sortOrder)
       const start = (page - 1) * PAGE_SIZE
       return filtered.slice(start, start + PAGE_SIZE)
     }
-    return rawGuns
-  }, [rawGuns, search, activeCategory, sortKey, sortOrder, page, useLocal])
+    return apiGuns
+  }, [apiGuns, search, activeCategory, sortKey, sortOrder, page, isFallbackLocal])
 
   const totalCount = useMemo(() => {
-    if (useLocal) {
-      return rawGuns.filter(
+    if (isFallbackLocal) {
+      return GUNS_LOCAL.filter(
         (g) => matchesSearch(g, search) && matchesCategory(g, activeCategory),
       ).length
     }
     return pagination?.total ?? displayedGuns.length
-  }, [useLocal, rawGuns, search, activeCategory, pagination, displayedGuns])
+  }, [isFallbackLocal, search, activeCategory, pagination, displayedGuns.length])
 
   const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE))
+
+  // Reset page to 1 when filters change
+  const handleSearchChange = useCallback((val) => {
+    setSearch(val)
+    setPage(1)
+  }, [])
+
+  const handleCategoryChange = useCallback((cat) => {
+    setActiveCategory(cat)
+    setPage(1)
+  }, [])
+
+  const handleSortChange = useCallback(({ key, order }) => {
+    setSortKey(key)
+    setSortOrder(order)
+    setPage(1)
+  }, [])
 
   // Detail view
   const [selectedGun, setSelectedGun] = useState(null)
@@ -152,6 +173,8 @@ export default function Catalog({ onNavigate }) {
 
   return (
     <>
+      <DevMigrationBanner />
+
       <section className="masthead">
         <h1 className="display">Hardware, by the spec sheet.</h1>
         <p className="lede">
@@ -200,23 +223,13 @@ export default function Catalog({ onNavigate }) {
         {/* Filters */}
         <AdvancedFilter
           search={search}
-          onSearch={(val) => {
-            setSearch(val)
-            setPage(1) // Reset to page 1 on search
-          }}
+          onSearch={handleSearchChange}
           categories={categories}
           activeCategory={activeCategory}
-          onCategory={(cat) => {
-            setActiveCategory(cat)
-            setPage(1) // Reset to page 1 on filter
-          }}
+          onCategory={handleCategoryChange}
           sortKey={sortKey}
           sortOrder={sortOrder}
-          onSort={({ key, order }) => {
-            setSortKey(key)
-            setSortOrder(order)
-            setPage(1)
-          }}
+          onSort={handleSortChange}
         />
 
         {/* States */}
@@ -227,20 +240,13 @@ export default function Catalog({ onNavigate }) {
           </div>
         )}
 
-        {!loading && error && !useLocal && (
+        {!loading && error && !isFallbackLocal && (
           <div className="state-box state-box--error p-6 bg-red-950/30 border border-red-800 rounded text-center">
             <AlertCircle size={28} className="mx-auto mb-2 text-red-400" />
             <p className="text-red-300">{error}</p>
             <div className="state-box__actions mt-4 flex justify-center gap-3">
               <button type="button" className="btn btn--outline" onClick={refetch}>
                 <RefreshCw size={16} /> Retry
-              </button>
-              <button
-                type="button"
-                className="btn btn--outline"
-                onClick={() => setUseLocal(true)}
-              >
-                View Local Catalog
               </button>
             </div>
           </div>
@@ -301,7 +307,6 @@ export default function Catalog({ onNavigate }) {
 
               {/* Page numbers */}
               {Array.from({ length: totalPages }, (_, i) => i + 1).map((p) => {
-                // Show pages around current
                 if (p === 1 || p === totalPages || (p >= page - 2 && p <= page + 2)) {
                   return (
                     <button
@@ -340,7 +345,7 @@ export default function Catalog({ onNavigate }) {
           </nav>
         )}
 
-        {useLocal && (
+        {isFallbackLocal && (
           <p className="local-notice mt-6 text-xs text-stone-500 text-center">
             Showing local catalog (server unavailable).{' '}
             <button

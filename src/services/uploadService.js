@@ -36,7 +36,7 @@ class UploadService {
     if (IS_SUPABASE) {
       const ext = file.name.split('.').pop() || 'png'
       const fileName = `gun_${Date.now()}_${Math.random().toString(36).substring(2, 7)}.${ext}`
-      const bucketName = 'guns'
+      const bucketName = 'product-images'
 
       try {
         const uploadUrl = `${BASE_URL}/storage/v1/object/${bucketName}/${fileName}`

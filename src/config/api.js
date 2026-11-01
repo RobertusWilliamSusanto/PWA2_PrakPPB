@@ -4,10 +4,15 @@ import axios from 'axios'
 // Base URL & Supabase Key Configuration
 // Read from environment variables (.env)
 // ---------------------------------------------------------------------------
-const BASE_URL = import.meta.env.VITE_API_BASE_URL || ''
+const metaEnv = typeof import.meta !== 'undefined' && import.meta.env ? import.meta.env : {}
+const procEnv = typeof process !== 'undefined' && process.env ? process.env : {}
+
+const BASE_URL = metaEnv.VITE_API_BASE_URL || procEnv.VITE_API_BASE_URL || procEnv.SUPABASE_URL || ''
 const SUPABASE_KEY =
-  import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY ||
-  import.meta.env.VITE_SUPABASE_ANON_KEY ||
+  metaEnv.VITE_SUPABASE_PUBLISHABLE_KEY ||
+  metaEnv.VITE_SUPABASE_ANON_KEY ||
+  procEnv.VITE_SUPABASE_PUBLISHABLE_KEY ||
+  procEnv.SUPABASE_PUBLISHABLE_KEY ||
   ''
 
 const IS_SUPABASE =
@@ -50,7 +55,17 @@ apiClient.interceptors.request.use(
 // Response interceptor — unwrap response and normalise errors
 // ---------------------------------------------------------------------------
 apiClient.interceptors.response.use(
-  (response) => response.data,
+  (response) => {
+    // If caller explicitly requested headers (e.g. for Content-Range pagination)
+    if (response.config?.returnHeaders) {
+      return {
+        data: response.data,
+        headers: response.headers,
+        status: response.status,
+      }
+    }
+    return response.data
+  },
   (error) => {
     let message = 'An unexpected error occurred'
     let status = null
