@@ -40,6 +40,10 @@ class QueryCache {
       return null
     }
 
+    if (typeof window !== 'undefined' && (window.__DEBUG_CACHE__ || import.meta.env?.DEV)) {
+      console.log(`%c[CACHE HIT] %c${key}`, 'color: #10b981; font-weight: bold', 'color: #94a3b8')
+    }
+
     return entry.data
   }
 
@@ -77,6 +81,29 @@ class QueryCache {
   clear() {
     this.store.clear()
   }
+
+  /**
+   * Return all active cache keys (for debugging / verification)
+   */
+  keys() {
+    return Array.from(this.store.keys())
+  }
+
+  /**
+   * Inspect cache content with remaining TTL
+   */
+  inspect() {
+    const list = []
+    for (const [key, entry] of this.store.entries()) {
+      const ttlRemaining = Math.max(0, Math.round((entry.expiresAt - Date.now()) / 1000))
+      list.push({ key, ttlRemaining: `${ttlRemaining}s`, data: entry.data })
+    }
+    return list
+  }
 }
 
 export const cache = new QueryCache()
+
+if (typeof window !== 'undefined') {
+  window.__cache = cache
+}

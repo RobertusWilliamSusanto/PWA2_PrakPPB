@@ -34,6 +34,7 @@ export default function Catalog({ onNavigate }) {
   // Read initial filter & page params from query string
   const urlParams = new URLSearchParams(window.location.search)
   const [page, setPage] = useState(() => Math.max(1, parseInt(urlParams.get('page') || '1', 10)))
+  const [pageSize, setPageSize] = useState(() => Math.max(1, parseInt(urlParams.get('limit') || '3', 10)))
   const [search, setSearch] = useState(() => urlParams.get('search') || '')
   const [activeCategory, setActiveCategory] = useState(() => urlParams.get('category') || 'All')
   const [sortKey, setSortKey] = useState(() => urlParams.get('sort') || 'name')
@@ -43,6 +44,7 @@ export default function Catalog({ onNavigate }) {
   useEffect(() => {
     const params = new URLSearchParams()
     if (page > 1) params.set('page', page)
+    if (pageSize !== 12) params.set('limit', pageSize)
     if (search) params.set('search', search)
     if (activeCategory !== 'All') params.set('category', activeCategory)
     if (sortKey !== 'name') params.set('sort', sortKey)
@@ -51,12 +53,12 @@ export default function Catalog({ onNavigate }) {
     const newQuery = params.toString()
     const newRelativePathQuery = window.location.pathname + (newQuery ? `?${newQuery}` : '')
     window.history.replaceState(null, '', newRelativePathQuery)
-  }, [page, search, activeCategory, sortKey, sortOrder])
+  }, [page, pageSize, search, activeCategory, sortKey, sortOrder])
 
   // Fetch from server with pagination and filter params
   const { guns: apiGuns, loading, error, pagination, refetch } = useGuns({
     page,
-    limit: PAGE_SIZE,
+    limit: pageSize,
     search,
     category: activeCategory,
     sort_by: sortKey,
@@ -87,11 +89,11 @@ export default function Catalog({ onNavigate }) {
         (g) => matchesSearch(g, search) && matchesCategory(g, activeCategory),
       )
       filtered = sortItems(filtered, sortKey, sortOrder)
-      const start = (page - 1) * PAGE_SIZE
-      return filtered.slice(start, start + PAGE_SIZE)
+      const start = (page - 1) * pageSize
+      return filtered.slice(start, start + pageSize)
     }
     return apiGuns
-  }, [apiGuns, search, activeCategory, sortKey, sortOrder, page, isFallbackLocal])
+  }, [apiGuns, search, activeCategory, sortKey, sortOrder, page, pageSize, isFallbackLocal])
 
   const totalCount = useMemo(() => {
     if (isFallbackLocal) {
@@ -102,7 +104,7 @@ export default function Catalog({ onNavigate }) {
     return pagination?.total ?? displayedGuns.length
   }, [isFallbackLocal, search, activeCategory, pagination, displayedGuns.length])
 
-  const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE))
+  const totalPages = Math.max(1, Math.ceil(totalCount / pageSize))
 
   // Reset page to 1 when filters change
   const handleSearchChange = useCallback((val) => {
@@ -284,14 +286,36 @@ export default function Catalog({ onNavigate }) {
         )}
 
         {/* Pagination Controls (Tugas 1) */}
-        {totalPages > 1 && (
+        {totalCount > 0 && (
           <nav
-            className="pagination-bar flex items-center justify-between border-t border-stone-800 mt-8 pt-4 px-2"
+            className="pagination-bar flex flex-wrap items-center justify-between gap-4 border-t border-stone-800 mt-8 pt-4 px-2"
             aria-label="Pagination Navigation"
           >
-            <div className="text-xs text-stone-400">
-              Menampilkan {Math.min(totalCount, (page - 1) * PAGE_SIZE + 1)} -{' '}
-              {Math.min(totalCount, page * PAGE_SIZE)} dari {totalCount} katalog
+            <div className="flex items-center gap-3">
+              <span className="text-xs text-stone-400">
+                Menampilkan {Math.min(totalCount, (page - 1) * pageSize + 1)} -{' '}
+                {Math.min(totalCount, page * pageSize)} dari {totalCount} katalog
+              </span>
+              <div className="flex items-center gap-1 text-xs text-stone-400">
+                <span>Per hal:</span>
+                {[3, 6, 12].map((sz) => (
+                  <button
+                    key={sz}
+                    type="button"
+                    className={`px-2 py-0.5 rounded text-xs transition-colors ${
+                      pageSize === sz
+                        ? 'bg-amber-500 text-stone-900 font-bold'
+                        : 'bg-stone-800 text-stone-300 hover:bg-stone-700'
+                    }`}
+                    onClick={() => {
+                      setPageSize(sz)
+                      setPage(1)
+                    }}
+                  >
+                    {sz}
+                  </button>
+                ))}
+              </div>
             </div>
 
             <div className="flex items-center gap-1.5">
@@ -314,7 +338,7 @@ export default function Catalog({ onNavigate }) {
                       type="button"
                       className={`w-8 h-8 rounded text-xs font-semibold flex items-center justify-center transition-colors ${
                         p === page
-                          ? 'bg-amber-500 text-stone-900'
+                          ? 'bg-amber-500 text-stone-900 font-bold ring-2 ring-amber-400/50'
                           : 'bg-stone-800 text-stone-300 hover:bg-stone-700'
                       }`}
                       onClick={() => handlePageChange(p)}

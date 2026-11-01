@@ -54,7 +54,10 @@ export const getUserIdentifier = () => {
 export const getUserProfile = () => {
   try {
     const raw = localStorage.getItem(USER_PROFILE_KEY)
-    if (raw) return JSON.parse(raw)
+    if (raw) {
+      const p = JSON.parse(raw)
+      return { username: p.username || 'Shooter', avatar: p.avatar || null, bio: p.bio || '', phone: p.phone || '087822408980', userId: p.userId || getUserIdentifier() }
+    }
   } catch {
     /* corrupted data — fall through to default */
   }
@@ -62,6 +65,7 @@ export const getUserProfile = () => {
     username: 'Shooter',
     avatar: null,
     bio: '',
+    phone: '087822408980',
     userId: getUserIdentifier(),
   }
 }

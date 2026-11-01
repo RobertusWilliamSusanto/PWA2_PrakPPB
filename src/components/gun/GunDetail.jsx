@@ -45,7 +45,7 @@ export default function GunDetail({ gun, onBack, onEdit, onDelete }) {
   // Share & WhatsApp (Tugas 2 & 8)
   const [shareFeedback, setShareFeedback] = useState('')
   const shareUrl = getGunShareUrl(gun)
-  const waUrl = getWhatsAppContactUrl(gun.seller_phone, gun, shareUrl)
+  const waUrl = getWhatsAppContactUrl(gun.seller_phone || '087822408980', gun, shareUrl)
 
   const handleShare = async () => {
     const res = await shareProduct(gun)
