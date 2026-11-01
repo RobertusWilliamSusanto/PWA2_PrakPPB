@@ -43,10 +43,11 @@ export default function EditGunPage({ gun, gunId, onBack, onSuccess }) {
     description: '',
     servings: 1,
     is_featured: false,
+    seller_phone: '081234567890',
   })
 
+  const [imagesList, setImagesList] = useState([])
   const [currentImageUrl, setCurrentImageUrl] = useState('')
-  const [imageFile, setImageFile] = useState(null)
   const [imagePreview, setImagePreview] = useState(null)
   const [uploading, setUploading] = useState(false)
 
@@ -87,8 +88,13 @@ export default function EditGunPage({ gun, gunId, onBack, onSuccess }) {
             description: data.description || '',
             servings: data.servings || 1,
             is_featured: Boolean(data.is_featured),
+            seller_phone: data.seller_phone || '081234567890',
           })
-          setCurrentImageUrl(data.image_url || data.image || '/guns/pistol.svg')
+          const loadedImgs = Array.isArray(data.images) && data.images.length > 0
+            ? data.images
+            : [{ url: data.image_url || data.image || '/guns/pistol.svg', is_primary: true }]
+          setImagesList(loadedImgs)
+          setCurrentImageUrl(loadedImgs[0]?.url || data.image_url || data.image || '/guns/pistol.svg')
 
           if (data.ingredients && data.ingredients.length > 0) {
             setSpecs(data.ingredients.map((ing) => ({
@@ -162,47 +168,87 @@ export default function EditGunPage({ gun, gunId, onBack, onSuccess }) {
     }
   }
 
-  // Handle new image file
-  const handleImageChange = (e) => {
-    const file = e.target.files[0]
-    if (!file) return
-
-    if (file.size > 5 * 1024 * 1024) {
-      setError('File size exceeds 5MB limit.')
-      return
-    }
+  // Handle multi-image file selection & upload (Tugas 9)
+  const handleMultipleImages = async (e) => {
+    const files = Array.from(e.target.files)
+    if (!files.length) return
 
     const allowed = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp']
-    if (!allowed.includes(file.type)) {
-      setError('Allowed formats: .jpg, .jpeg, .png, .webp')
-      return
+    for (const file of files) {
+      if (file.size > 5 * 1024 * 1024) {
+        setError(`File ${file.name} melebihi batas 5MB.`)
+        return
+      }
+      if (!allowed.includes(file.type)) {
+        setError(`File ${file.name} bukan format yang didukung (.jpg, .png, .webp).`)
+        return
+      }
     }
 
-    setImageFile(file)
-    setImagePreview(URL.createObjectURL(file))
-    setError('')
-  }
-
-  const handleUploadNewImage = async () => {
-    if (!imageFile) return
     try {
       setUploading(true)
-      const res = await uploadService.uploadImage(imageFile)
-      if (res.success && res.data?.url) {
-        setCurrentImageUrl(res.data.url)
-        setImageFile(null)
-        setImagePreview(null)
-        setSuccessMsg('New image uploaded successfully.')
-        setTimeout(() => setSuccessMsg(''), 3000)
-      }
+      setError('')
+      const uploaded = await uploadService.uploadMultipleImages(files)
+      setImagesList((prev) => {
+        const next = [
+          ...prev,
+          ...uploaded.map((u, i) => ({
+            url: u.url,
+            is_primary: prev.length === 0 && i === 0,
+          })),
+        ]
+        if (next.length > 0) {
+          setCurrentImageUrl(next[0].url)
+        }
+        return next
+      })
+      setSuccessMsg('Foto berhasil ditambahkan.')
+      setTimeout(() => setSuccessMsg(''), 3000)
     } catch (err) {
-      console.warn('Image upload failed, using local blob:', err)
-      setCurrentImageUrl(imagePreview)
-      setImageFile(null)
-      setImagePreview(null)
+      setError(err.message || 'Gagal mengupload gambar.')
     } finally {
       setUploading(false)
     }
+  }
+
+  const handleRemoveImage = (idx) => {
+    setImagesList((prev) => {
+      const next = prev.filter((_, i) => i !== idx)
+      if (next.length > 0 && !next.some((img) => img.is_primary)) {
+        next[0].is_primary = true
+      }
+      setCurrentImageUrl(next[0]?.url || '')
+      return next
+    })
+  }
+
+  const handleSetPrimary = (idx) => {
+    setImagesList((prev) => {
+      const target = prev[idx]
+      const remaining = prev.filter((_, i) => i !== idx)
+      const next = [{ ...target, is_primary: true }, ...remaining.map((r) => ({ ...r, is_primary: false }))]
+      setCurrentImageUrl(next[0].url)
+      return next
+    })
+  }
+
+  const handleMoveImage = (idx, dir) => {
+    setImagesList((prev) => {
+      const newIdx = idx + dir
+      if (newIdx < 0 || newIdx >= prev.length) return prev
+      const copy = [...prev]
+      const [moved] = copy.splice(idx, 1)
+      copy.splice(newIdx, 0, moved)
+      copy.forEach((c, i) => {
+        c.is_primary = i === 0
+      })
+      setCurrentImageUrl(copy[0].url)
+      return copy
+    })
+  }
+
+  const handleImageChange = (e) => {
+    handleMultipleImages(e)
   }
 
   // Specs & Steps
@@ -265,6 +311,7 @@ export default function EditGunPage({ gun, gunId, onBack, onSuccess }) {
       return
     }
 
+    const primaryImg = imagesList[0]?.url || currentImageUrl || '/guns/pistol.svg'
     const payload = {
       name: formData.name.trim(),
       type: formData.type || (formData.category === 'minuman' ? 'Rifle' : 'Pistol'),
@@ -272,7 +319,9 @@ export default function EditGunPage({ gun, gunId, onBack, onSuccess }) {
       price: Number(formData.price) || 500,
       category: formData.category || 'makanan',
       description: formData.description.trim() || `${formData.type} caliber ${formData.caliber}.`,
-      image_url: imagePreview || currentImageUrl || '/guns/pistol.svg',
+      image_url: primaryImg,
+      images: imagesList.length > 0 ? imagesList : [{ url: primaryImg, display_order: 0, is_primary: true }],
+      seller_phone: formData.seller_phone || '081234567890',
       prep_time: 15,
       cook_time: Number(formData.price) || 500,
       servings: Number(formData.servings) || 1,
@@ -347,43 +396,91 @@ export default function EditGunPage({ gun, gunId, onBack, onSuccess }) {
       )}
 
       <form onSubmit={handleSubmit} className="entry-form">
-        {/* Imagery Section */}
+        {/* Imagery Section (Tugas 9) */}
         <div className="card-box">
-          <h2 className="card-box-title">Visual Asset</h2>
-          <div className="edit-img-wrap">
-            <img
-              src={imagePreview || currentImageUrl}
-              alt="Current hardware"
-              className="edit-current-img"
-            />
-            <div className="edit-img-controls">
+          <h2 className="card-box-title">Multi-Gambar Katalog</h2>
+          <p className="card-box-desc">
+            Kelola foto hardware. Gambar pertama (#1) otomatis menjadi thumbnail / primary image katalog.
+          </p>
+
+          <div className="space-y-4">
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+              {imagesList.map((img, idx) => {
+                const url = typeof img === 'string' ? img : img.url
+                return (
+                  <div
+                    key={idx}
+                    className={`relative rounded border-2 overflow-hidden bg-stone-900 aspect-video flex items-center justify-center ${
+                      idx === 0 ? 'border-amber-500' : 'border-stone-700'
+                    }`}
+                  >
+                    <img src={url} alt={`Hardware ${idx + 1}`} className="w-full h-full object-contain" />
+                    <span
+                      className={`absolute top-1 left-1 text-[10px] px-1.5 py-0.5 rounded ${
+                        idx === 0 ? 'bg-amber-500 text-stone-900 font-bold' : 'bg-stone-900/80 text-stone-300'
+                      }`}
+                    >
+                      {idx === 0 ? 'Thumbnail' : `#${idx + 1}`}
+                    </span>
+
+                    <div className="absolute bottom-1 right-1 flex gap-1">
+                      {idx > 0 && (
+                        <button
+                          type="button"
+                          className="p-1 bg-black/70 hover:bg-black text-xs rounded text-stone-200"
+                          onClick={() => handleSetPrimary(idx)}
+                          title="Jadikan Thumbnail"
+                        >
+                          ★
+                        </button>
+                      )}
+                      {idx > 0 && (
+                        <button
+                          type="button"
+                          className="p-1 bg-black/70 hover:bg-black text-xs rounded text-stone-200"
+                          onClick={() => handleMoveImage(idx, -1)}
+                          title="Pindah ke kiri"
+                        >
+                          ◀
+                        </button>
+                      )}
+                      {idx < imagesList.length - 1 && (
+                        <button
+                          type="button"
+                          className="p-1 bg-black/70 hover:bg-black text-xs rounded text-stone-200"
+                          onClick={() => handleMoveImage(idx, 1)}
+                          title="Pindah ke kanan"
+                        >
+                          ▶
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        className="p-1 bg-red-900/80 hover:bg-red-700 text-xs rounded text-white"
+                        onClick={() => handleRemoveImage(idx)}
+                        title="Hapus gambar"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+
+            <div className="pt-2">
+              <label htmlFor="edit-gun-image" className="btn btn--outline btn--sm cursor-pointer inline-flex items-center gap-1.5">
+                <Upload size={14} /> Tambah Foto (JPG, PNG, WebP &le; 5MB)
+              </label>
               <input
                 id="edit-gun-image"
                 type="file"
+                multiple
                 accept="image/jpeg,image/jpg,image/png,image/webp"
                 onChange={handleImageChange}
-                className="hidden-file-input"
+                className="hidden"
               />
-              <label htmlFor="edit-gun-image" className="btn btn--outline btn--sm">
-                <Upload size={14} /> Select New Image File
-              </label>
-
-              {imageFile && (
-                <button
-                  type="button"
-                  className="btn btn--primary btn--sm"
-                  onClick={handleUploadNewImage}
-                  disabled={uploading}
-                >
-                  {uploading ? (
-                    <>
-                      <Loader size={14} className="spin" /> Uploading…
-                    </>
-                  ) : (
-                    'Upload to MinIO'
-                  )}
-                </button>
-              )}
+              {uploading && <span className="text-xs text-amber-400 ml-2">Mengunggah…</span>}
             </div>
           </div>
         </div>
@@ -491,6 +588,21 @@ export default function EditGunPage({ gun, gunId, onBack, onSuccess }) {
             onChange={(e) => setFormData((p) => ({ ...p, description: e.target.value }))}
             rows={3}
             className="form-textarea"
+          />
+        </div>
+
+        <div className="form-group">
+          <label htmlFor="edit-seller-phone" className="form-label">
+            Nomor WhatsApp Penjual
+          </label>
+          <input
+            id="edit-seller-phone"
+            type="tel"
+            name="seller_phone"
+            value={formData.seller_phone}
+            onChange={(e) => setFormData((p) => ({ ...p, seller_phone: e.target.value }))}
+            placeholder="e.g. 081234567890"
+            className="form-input"
           />
         </div>
 

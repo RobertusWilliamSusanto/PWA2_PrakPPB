@@ -39,9 +39,10 @@ export default function CreateGunPage({ onBack, onSuccess }) {
     description: '',
     servings: 1,
     is_featured: false,
+    seller_phone: '081234567890',
   })
 
-  const [imageFile, setImageFile] = useState(null)
+  const [imagesList, setImagesList] = useState([])
   const [imagePreview, setImagePreview] = useState(null)
   const [uploadedImageUrl, setUploadedImageUrl] = useState('')
 
@@ -119,66 +120,108 @@ export default function CreateGunPage({ onBack, onSuccess }) {
     setDraftTimestamp(null)
   }
 
-  // Handle file selection
-  const handleImageChange = (e) => {
-    const file = e.target.files[0]
-    if (!file) return
-
-    if (file.size > 5 * 1024 * 1024) {
-      setError('File size exceeds 5MB limit.')
-      return
-    }
+  // Multi-image handlers (Tugas 9)
+  const handleMultipleImages = async (e) => {
+    const files = Array.from(e.target.files)
+    if (!files.length) return
 
     const allowed = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp']
-    if (!allowed.includes(file.type)) {
-      setError('Allowed formats: .jpg, .jpeg, .png, .webp')
-      return
-    }
-
-    setImageFile(file)
-    setImagePreview(URL.createObjectURL(file))
-    setError('')
-  }
-
-  // Quick fallback select vector from local assets
-  const handleSelectPreset = (url) => {
-    setImageFile(null)
-    setImagePreview(url)
-    setUploadedImageUrl(url)
-    setCurrentStep('form')
-    setError('')
-  }
-
-  // Upload image to server
-  const handleUploadImage = async () => {
-    if (!imageFile) {
-      // If user already previewed a preset or entered a url, advance to form
-      if (uploadedImageUrl) {
-        setCurrentStep('form')
+    for (const file of files) {
+      if (file.size > 5 * 1024 * 1024) {
+        setError(`File ${file.name} melebihi batas 5MB.`)
         return
       }
-      setError('Please select an image file first.')
-      return
+      if (!allowed.includes(file.type)) {
+        setError(`File ${file.name} bukan format yang didukung (.jpg, .png, .webp).`)
+        return
+      }
     }
 
     try {
       setUploading(true)
       setError('')
-      const result = await uploadService.uploadImage(imageFile)
-      if (result.success && result.data?.url) {
-        setUploadedImageUrl(result.data.url)
-        setCurrentStep('form')
-      } else {
-        throw new Error(result.message || 'Image upload failed.')
-      }
+      const uploaded = await uploadService.uploadMultipleImages(files)
+      setImagesList((prev) => {
+        const next = [
+          ...prev,
+          ...uploaded.map((u, i) => ({
+            url: u.url,
+            is_primary: prev.length === 0 && i === 0,
+          })),
+        ]
+        if (next.length > 0) {
+          setUploadedImageUrl(next[0].url)
+          setImagePreview(next[0].url)
+        }
+        return next
+      })
     } catch (err) {
-      console.warn('Upload API failed, falling back to local preview:', err)
-      // Allow fallback to image preview so the user can continue even if MinIO bucket is unreachable
-      setUploadedImageUrl(imagePreview || '/guns/pistol.svg')
-      setCurrentStep('form')
+      setError(err.message || 'Gagal mengupload gambar.')
     } finally {
       setUploading(false)
     }
+  }
+
+  const handleSelectPreset = (url) => {
+    setImagesList((prev) => {
+      const next = [...prev, { url, is_primary: prev.length === 0 }]
+      setUploadedImageUrl(next[0].url)
+      setImagePreview(next[0].url)
+      return next
+    })
+    setError('')
+  }
+
+  const handleRemoveImage = (idx) => {
+    setImagesList((prev) => {
+      const next = prev.filter((_, i) => i !== idx)
+      if (next.length > 0 && !next.some((img) => img.is_primary)) {
+        next[0].is_primary = true
+      }
+      setUploadedImageUrl(next[0]?.url || '')
+      setImagePreview(next[0]?.url || null)
+      return next
+    })
+  }
+
+  const handleSetPrimary = (idx) => {
+    setImagesList((prev) => {
+      const target = prev[idx]
+      const remaining = prev.filter((_, i) => i !== idx)
+      const next = [{ ...target, is_primary: true }, ...remaining.map(r => ({ ...r, is_primary: false }))]
+      setUploadedImageUrl(next[0].url)
+      setImagePreview(next[0].url)
+      return next
+    })
+  }
+
+  const handleMoveImage = (idx, dir) => {
+    setImagesList((prev) => {
+      const newIdx = idx + dir
+      if (newIdx < 0 || newIdx >= prev.length) return prev
+      const copy = [...prev]
+      const [moved] = copy.splice(idx, 1)
+      copy.splice(newIdx, 0, moved)
+      // First is primary thumbnail
+      copy.forEach((c, i) => { c.is_primary = i === 0 })
+      setUploadedImageUrl(copy[0].url)
+      setImagePreview(copy[0].url)
+      return copy
+    })
+  }
+
+  // Handle single file fallback
+  const handleImageChange = (e) => {
+    handleMultipleImages(e)
+  }
+
+  // Upload image to server
+  const handleUploadImage = async () => {
+    if (imagesList.length > 0 || uploadedImageUrl) {
+      setCurrentStep('form')
+      return
+    }
+    setError('Silakan pilih minimal 1 foto hardware terlebih dahulu.')
   }
 
   const handleFormChange = (e) => {
@@ -256,12 +299,16 @@ export default function CreateGunPage({ onBack, onSuccess }) {
       return
     }
 
-    // Prepare payload compliant with backend /api/v1/recipes schema
+    // Prepare payload compliant with backend /api/v1/recipes schema & Supabase
+    const primaryImg = imagesList[0]?.url || uploadedImageUrl || '/guns/pistol.svg'
     const payload = {
       name: formData.name.trim(),
+      type: formData.type || 'Pistol',
       category: formData.category || 'makanan',
       description: formData.description.trim() || `${formData.type} caliber ${formData.caliber}.`,
-      image_url: uploadedImageUrl || '/guns/pistol.svg',
+      image_url: primaryImg,
+      images: imagesList.length > 0 ? imagesList : [{ url: primaryImg, display_order: 0, is_primary: true }],
+      seller_phone: formData.seller_phone || '081234567890',
       prep_time: 15,
       cook_time: Number(formData.price) || 500, // Price stored in cook_time
       servings: Number(formData.servings) || 1,
@@ -351,23 +398,24 @@ export default function CreateGunPage({ onBack, onSuccess }) {
             Upload an authentic photograph or blueprint (max 5MB), or select an armory preset.
           </p>
 
-          {!imagePreview ? (
+          {imagesList.length === 0 ? (
             <div className="upload-dropzone">
               <input
                 id="gun-image-input"
                 type="file"
+                multiple
                 accept="image/jpeg,image/jpg,image/png,image/webp"
                 onChange={handleImageChange}
                 className="hidden-file-input"
               />
               <label htmlFor="gun-image-input" className="upload-label">
                 <Upload size={36} className="upload-icon" />
-                <span className="upload-main-text">Click to choose an image file</span>
-                <span className="upload-sub-text">JPG, PNG, or WebP up to 5MB</span>
+                <span className="upload-main-text">Pilih satu atau banyak gambar hardware</span>
+                <span className="upload-sub-text">JPG, PNG, atau WebP (maks 5MB per file)</span>
               </label>
 
               <div className="preset-selector">
-                <span className="preset-title">Or use a stock preset:</span>
+                <span className="preset-title">Atau pilih preset armory:</span>
                 <div className="preset-pills">
                   <button
                     type="button"
@@ -394,24 +442,88 @@ export default function CreateGunPage({ onBack, onSuccess }) {
               </div>
             </div>
           ) : (
-            <div className="preview-container">
-              <div className="preview-image-wrap">
-                <img src={imagePreview} alt="Hardware preview" className="preview-img" />
-                <button
-                  type="button"
-                  className="preview-remove-btn"
-                  onClick={() => {
-                    setImageFile(null)
-                    setImagePreview(null)
-                    setUploadedImageUrl('')
-                  }}
-                  title="Remove image"
-                >
-                  <X size={18} />
-                </button>
+            <div className="preview-container space-y-4">
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                {imagesList.map((img, idx) => (
+                  <div
+                    key={idx}
+                    className={`relative rounded border-2 overflow-hidden bg-stone-900 aspect-video flex items-center justify-center ${
+                      idx === 0 ? 'border-amber-500' : 'border-stone-700'
+                    }`}
+                  >
+                    <img src={img.url} alt={`Preview ${idx + 1}`} className="w-full h-full object-contain" />
+                    <span
+                      className={`absolute top-1 left-1 text-[10px] px-1.5 py-0.5 rounded ${
+                        idx === 0
+                          ? 'bg-amber-500 text-stone-900 font-bold'
+                          : 'bg-stone-900/80 text-stone-300'
+                      }`}
+                    >
+                      {idx === 0 ? 'Thumbnail' : `#${idx + 1}`}
+                    </span>
+
+                    <div className="absolute bottom-1 right-1 flex gap-1">
+                      {idx > 0 && (
+                        <button
+                          type="button"
+                          className="p-1 bg-black/70 hover:bg-black text-xs rounded text-stone-200"
+                          onClick={() => handleSetPrimary(idx)}
+                          title="Jadikan Thumbnail"
+                        >
+                          ★
+                        </button>
+                      )}
+                      {idx > 0 && (
+                        <button
+                          type="button"
+                          className="p-1 bg-black/70 hover:bg-black text-xs rounded text-stone-200"
+                          onClick={() => handleMoveImage(idx, -1)}
+                          title="Pindah ke kiri"
+                        >
+                          ◀
+                        </button>
+                      )}
+                      {idx < imagesList.length - 1 && (
+                        <button
+                          type="button"
+                          className="p-1 bg-black/70 hover:bg-black text-xs rounded text-stone-200"
+                          onClick={() => handleMoveImage(idx, 1)}
+                          title="Pindah ke kanan"
+                        >
+                          ▶
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        className="p-1 bg-red-900/80 hover:bg-red-700 text-xs rounded text-white"
+                        onClick={() => handleRemoveImage(idx)}
+                        title="Hapus gambar"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  </div>
+                ))}
               </div>
 
-              <div className="preview-actions">
+              <div className="flex flex-wrap gap-3 items-center justify-between pt-2">
+                <div>
+                  <label
+                    htmlFor="gun-image-add-more"
+                    className="btn btn--outline btn--sm cursor-pointer inline-flex items-center gap-1.5"
+                  >
+                    <Plus size={14} /> Tambah Foto Lain
+                  </label>
+                  <input
+                    id="gun-image-add-more"
+                    type="file"
+                    multiple
+                    accept="image/jpeg,image/jpg,image/png,image/webp"
+                    onChange={handleImageChange}
+                    className="hidden"
+                  />
+                </div>
+
                 <button
                   type="button"
                   className="btn btn--primary"
@@ -420,23 +532,13 @@ export default function CreateGunPage({ onBack, onSuccess }) {
                 >
                   {uploading ? (
                     <>
-                      <Loader size={18} className="spin" /> Uploading to MinIO…
+                      <Loader size={18} className="spin" /> Mengunggah…
                     </>
                   ) : (
                     <>
-                      <Upload size={18} /> Confirm Imagery &amp; Continue
+                      Lanjut ke Spesifikasi &rarr;
                     </>
                   )}
-                </button>
-                <button
-                  type="button"
-                  className="btn btn--outline"
-                  onClick={() => {
-                    setUploadedImageUrl(imagePreview)
-                    setCurrentStep('form')
-                  }}
-                >
-                  Continue without uploading
                 </button>
               </div>
             </div>
@@ -572,6 +674,24 @@ export default function CreateGunPage({ onBack, onSuccess }) {
               rows={3}
               className="form-textarea"
             />
+          </div>
+
+          <div className="form-group">
+            <label htmlFor="seller_phone" className="form-label">
+              Nomor WhatsApp Penjual
+            </label>
+            <input
+              id="seller_phone"
+              type="tel"
+              name="seller_phone"
+              value={formData.seller_phone}
+              onChange={handleFormChange}
+              placeholder="e.g. 081234567890"
+              className="form-input"
+            />
+            <p className="text-xs text-stone-500 mt-1">
+              Nomor WhatsApp penjual yang akan dihubungi oleh calon pembeli.
+            </p>
           </div>
 
           {/* Specifications (Ingredients) */}

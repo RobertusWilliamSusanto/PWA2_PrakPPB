@@ -38,7 +38,7 @@ export function useReviews(gunId) {
     fetchReviews()
   }, [fetchReviews])
 
-  return { reviews, loading, error, refetch: fetchReviews }
+  return { reviews, setReviews, loading, error, refetch: fetchReviews }
 }
 
 // ---------------------------------------------------------------------------
@@ -74,4 +74,77 @@ export function useCreateReview() {
   }
 
   return { createReview, loading, error, success }
+}
+
+// ---------------------------------------------------------------------------
+// useUpdateReview — update an existing review.
+// ---------------------------------------------------------------------------
+
+export function useUpdateReview() {
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState(null)
+
+  const updateReview = async (reviewId, reviewData) => {
+    try {
+      setLoading(true)
+      setError(null)
+      const response = await reviewService.updateReview(reviewId, reviewData)
+      return response.success ? response.data : null
+    } catch (err) {
+      setError(err.message || 'Failed to update review.')
+      return null
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return { updateReview, loading, error }
+}
+
+// ---------------------------------------------------------------------------
+// useDeleteReview — delete an existing review.
+// ---------------------------------------------------------------------------
+
+export function useDeleteReview() {
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState(null)
+
+  const deleteReview = async (reviewId) => {
+    try {
+      setLoading(true)
+      setError(null)
+      const response = await reviewService.deleteReview(reviewId)
+      return response.success
+    } catch (err) {
+      setError(err.message || 'Failed to delete review.')
+      return false
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return { deleteReview, loading, error }
+}
+
+// ---------------------------------------------------------------------------
+// useVoteReview — toggle thumbs up / thumbs down with debounce.
+// ---------------------------------------------------------------------------
+
+export function useVoteReview() {
+  const [votingId, setVotingId] = useState(null)
+
+  const voteReview = async (reviewId, voteValue) => {
+    try {
+      setVotingId(reviewId)
+      const result = await reviewService.voteReview(reviewId, voteValue)
+      return result
+    } catch (err) {
+      console.error('Failed to vote review:', err)
+      return null
+    } finally {
+      setVotingId(null)
+    }
+  }
+
+  return { voteReview, votingId }
 }

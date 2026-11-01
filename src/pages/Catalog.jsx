@@ -1,5 +1,14 @@
-import { useState, useMemo } from 'react'
-import { RefreshCw, Plus, Loader, AlertCircle, PackageOpen } from 'lucide-react'
+import { useState, useMemo, useEffect, useCallback } from 'react'
+import {
+  RefreshCw,
+  Plus,
+  Loader,
+  AlertCircle,
+  PackageOpen,
+  ChevronLeft,
+  ChevronRight,
+  Archive,
+} from 'lucide-react'
 import { useGuns } from '../hooks/useGuns'
 import GUNS_LOCAL from '../data/guns'
 import GunCard from '../components/gun/GunCard'
@@ -14,51 +23,91 @@ import {
   extractCategories,
 } from '../utils/helpers'
 
+const PAGE_SIZE = 12
+
 /**
- * Catalog page — the main product listing.
- *
- * Data source priority:
- *   1. Live API via useGuns()
- *   2. Local static array (GUNS_LOCAL) when the API is unreachable
- *
- * Features: search, category filter, sort, CRUD actions, detail modal.
+ * Catalog page with server-side pagination, query caching, soft-delete archive,
+ * and URL query string preservation.
  */
 export default function Catalog({ onNavigate }) {
-  // ---- API data ----
-  const { guns: apiGuns, loading, error, refetch } = useGuns({ limit: 50 })
+  // Read initial filter & page params from query string
+  const urlParams = new URLSearchParams(window.location.search)
+  const [page, setPage] = useState(() => Math.max(1, parseInt(urlParams.get('page') || '1', 10)))
+  const [search, setSearch] = useState(() => urlParams.get('search') || '')
+  const [activeCategory, setActiveCategory] = useState(() => urlParams.get('category') || 'All')
+  const [sortKey, setSortKey] = useState(() => urlParams.get('sort') || 'name')
+  const [sortOrder, setSortOrder] = useState(() => urlParams.get('order') || 'asc')
   const [useLocal, setUseLocal] = useState(false)
 
-  // Decide data source
+  // Sync state to URL query string so search/filter/page are retained
+  useEffect(() => {
+    const params = new URLSearchParams()
+    if (page > 1) params.set('page', page)
+    if (search) params.set('search', search)
+    if (activeCategory !== 'All') params.set('category', activeCategory)
+    if (sortKey !== 'name') params.set('sort', sortKey)
+    if (sortOrder !== 'asc') params.set('order', sortOrder)
+
+    const newQuery = params.toString()
+    const newRelativePathQuery = window.location.pathname + (newQuery ? `?${newQuery}` : '')
+    window.history.replaceState(null, '', newRelativePathQuery)
+  }, [page, search, activeCategory, sortKey, sortOrder])
+
+  // Fetch from server with pagination and filter params
+  const { guns: apiGuns, loading, error, pagination, refetch } = useGuns({
+    page,
+    limit: PAGE_SIZE,
+    search,
+    category: activeCategory,
+    sort_by: sortKey,
+    order: sortOrder,
+  })
+
+  // Fallback to local data if server is unreachable
   const rawGuns = useMemo(() => {
     if (useLocal || (error && apiGuns.length === 0)) {
-      // Enrich local data with synthetic ids so FavoriteButton and detail work
       return GUNS_LOCAL.map((g, i) => ({ ...g, id: g.id || `local-${i}` }))
     }
     return apiGuns
   }, [apiGuns, error, useLocal])
 
-  // ---- filters / sort ----
-  const [search, setSearch] = useState('')
-  const [activeCategory, setActiveCategory] = useState('All')
-  const [sortKey, setSortKey] = useState('name')
-  const [sortOrder, setSortOrder] = useState('asc')
+  // Available categories
+  const categories = useMemo(() => {
+    return extractCategories(GUNS_LOCAL)
+  }, [])
 
-  const categories = useMemo(() => extractCategories(rawGuns), [rawGuns])
+  // If using local data fallback, apply client-side filtering and slicing
+  const displayedGuns = useMemo(() => {
+    if (useLocal) {
+      let filtered = rawGuns.filter(
+        (g) => matchesSearch(g, search) && matchesCategory(g, activeCategory),
+      )
+      filtered = sortItems(filtered, sortKey, sortOrder)
+      const start = (page - 1) * PAGE_SIZE
+      return filtered.slice(start, start + PAGE_SIZE)
+    }
+    return rawGuns
+  }, [rawGuns, search, activeCategory, sortKey, sortOrder, page, useLocal])
 
-  const filteredGuns = useMemo(() => {
-    let result = rawGuns.filter(
-      (g) => matchesSearch(g, search) && matchesCategory(g, activeCategory),
-    )
-    return sortItems(result, sortKey, sortOrder)
-  }, [rawGuns, search, activeCategory, sortKey, sortOrder])
+  const totalCount = useMemo(() => {
+    if (useLocal) {
+      return rawGuns.filter(
+        (g) => matchesSearch(g, search) && matchesCategory(g, activeCategory),
+      ).length
+    }
+    return pagination?.total ?? displayedGuns.length
+  }, [useLocal, rawGuns, search, activeCategory, pagination, displayedGuns])
 
-  // ---- detail view ----
+  const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE))
+
+  // Detail view
   const [selectedGun, setSelectedGun] = useState(null)
 
-  // ---- delete ----
+  // Soft delete target
   const [deleteTarget, setDeleteTarget] = useState(null)
   const [deleting, setDeleting] = useState(false)
   const [deleteError, setDeleteError] = useState('')
+  const [actionSuccess, setActionSuccess] = useState('')
 
   const handleDelete = async () => {
     if (!deleteTarget) return
@@ -66,49 +115,80 @@ export default function Catalog({ onNavigate }) {
       setDeleting(true)
       setDeleteError('')
       await gunService.deleteGun(deleteTarget.id)
+      setActionSuccess(`"${deleteTarget.name}" berhasil dipindahkan ke Arsip.`)
       setDeleteTarget(null)
       refetch()
+      setTimeout(() => setActionSuccess(''), 4000)
     } catch (err) {
-      setDeleteError(err.message || 'Failed to delete.')
+      setDeleteError(err.message || 'Gagal mengarsipkan katalog.')
     } finally {
       setDeleting(false)
     }
   }
 
-  // ---- If viewing a single product detail ----
+  const handlePageChange = useCallback(
+    (newPage) => {
+      const target = Math.max(1, Math.min(totalPages, newPage))
+      setPage(target)
+      window.scrollTo({ top: 120, behavior: 'smooth' })
+    },
+    [totalPages],
+  )
+
+  // If viewing a single product detail
   if (selectedGun) {
     return (
       <GunDetail
         gun={selectedGun}
         onBack={() => setSelectedGun(null)}
         onEdit={(g) => onNavigate && onNavigate('Edit', g)}
-        onDelete={(g) => { setSelectedGun(null); setDeleteTarget(g) }}
+        onDelete={(g) => {
+          setSelectedGun(null)
+          setDeleteTarget(g)
+        }}
       />
     )
   }
 
-  // ---- Main catalog view ----
   return (
     <>
       <section className="masthead">
         <h1 className="display">Hardware, by the spec sheet.</h1>
         <p className="lede">
-          A small armory of pistols, rifles, and shotguns. Every piece listed
-          with its type, caliber, and price — nothing else.
+          A small armory of pistols, rifles, and shotguns. Every piece listed with its type,
+          caliber, and price — nothing else.
         </p>
       </section>
 
+      {actionSuccess && (
+        <div className="mb-4 p-3 bg-emerald-950/60 border border-emerald-800 text-emerald-300 rounded text-sm max-w-5xl mx-auto">
+          {actionSuccess}
+        </div>
+      )}
+
       <section>
-        <div className="list-head">
+        <div className="list-head flex justify-between items-center mb-4">
           <h2>Current stock</h2>
-          <div className="list-head-right">
-            <span className="count">
-              {filteredGuns.length} piece{filteredGuns.length !== 1 ? 's' : ''}
+          <div className="list-head-right flex items-center gap-3">
+            <span className="count text-sm text-stone-400">
+              {totalCount} piece{totalCount !== 1 ? 's' : ''} total
             </span>
+
             {onNavigate && (
               <button
                 type="button"
-                className="btn btn--primary btn--sm"
+                className="btn btn--outline btn--sm flex items-center gap-1.5"
+                onClick={() => onNavigate('Archive')}
+                title="Buka Arsip Katalog"
+              >
+                <Archive size={14} /> Arsip
+              </button>
+            )}
+
+            {onNavigate && (
+              <button
+                type="button"
+                className="btn btn--primary btn--sm flex items-center gap-1"
                 onClick={() => onNavigate('Create')}
               >
                 <Plus size={16} /> Add
@@ -120,28 +200,38 @@ export default function Catalog({ onNavigate }) {
         {/* Filters */}
         <AdvancedFilter
           search={search}
-          onSearch={setSearch}
+          onSearch={(val) => {
+            setSearch(val)
+            setPage(1) // Reset to page 1 on search
+          }}
           categories={categories}
           activeCategory={activeCategory}
-          onCategory={setActiveCategory}
+          onCategory={(cat) => {
+            setActiveCategory(cat)
+            setPage(1) // Reset to page 1 on filter
+          }}
           sortKey={sortKey}
           sortOrder={sortOrder}
-          onSort={({ key, order }) => { setSortKey(key); setSortOrder(order) }}
+          onSort={({ key, order }) => {
+            setSortKey(key)
+            setSortOrder(order)
+            setPage(1)
+          }}
         />
 
         {/* States */}
         {loading && (
-          <div className="state-box">
-            <Loader size={28} className="spin" />
-            <p>Loading products…</p>
+          <div className="state-box py-16 text-center flex flex-col items-center justify-center">
+            <Loader size={28} className="spin text-amber-500 mb-2" />
+            <p className="text-stone-400">Loading catalog page {page}…</p>
           </div>
         )}
 
         {!loading && error && !useLocal && (
-          <div className="state-box state-box--error">
-            <AlertCircle size={28} />
-            <p>{error}</p>
-            <div className="state-box__actions">
+          <div className="state-box state-box--error p-6 bg-red-950/30 border border-red-800 rounded text-center">
+            <AlertCircle size={28} className="mx-auto mb-2 text-red-400" />
+            <p className="text-red-300">{error}</p>
+            <div className="state-box__actions mt-4 flex justify-center gap-3">
               <button type="button" className="btn btn--outline" onClick={refetch}>
                 <RefreshCw size={16} /> Retry
               </button>
@@ -156,17 +246,26 @@ export default function Catalog({ onNavigate }) {
           </div>
         )}
 
-        {!loading && filteredGuns.length === 0 && !error && (
-          <div className="state-box">
-            <PackageOpen size={28} />
-            <p>No products match your search.</p>
+        {!loading && displayedGuns.length === 0 && !error && (
+          <div className="state-box py-16 text-center">
+            <PackageOpen size={36} className="mx-auto mb-2 text-stone-500" />
+            <p className="text-stone-400">No hardware found matching your criteria.</p>
+            {page > 1 && (
+              <button
+                type="button"
+                className="btn btn--outline btn--sm mt-3"
+                onClick={() => setPage(1)}
+              >
+                Kembali ke Halaman 1
+              </button>
+            )}
           </div>
         )}
 
         {/* Product grid */}
-        {filteredGuns.length > 0 && (
+        {!loading && displayedGuns.length > 0 && (
           <ul className="stock">
-            {filteredGuns.map((gun) => (
+            {displayedGuns.map((gun) => (
               <GunCard
                 key={gun.id || gun.name}
                 gun={gun}
@@ -178,13 +277,79 @@ export default function Catalog({ onNavigate }) {
           </ul>
         )}
 
+        {/* Pagination Controls (Tugas 1) */}
+        {totalPages > 1 && (
+          <nav
+            className="pagination-bar flex items-center justify-between border-t border-stone-800 mt-8 pt-4 px-2"
+            aria-label="Pagination Navigation"
+          >
+            <div className="text-xs text-stone-400">
+              Menampilkan {Math.min(totalCount, (page - 1) * PAGE_SIZE + 1)} -{' '}
+              {Math.min(totalCount, page * PAGE_SIZE)} dari {totalCount} katalog
+            </div>
+
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                className="btn btn--outline btn--sm p-1.5 disabled:opacity-30 disabled:cursor-not-allowed"
+                disabled={page <= 1}
+                onClick={() => handlePageChange(page - 1)}
+                aria-label="Halaman sebelumnya"
+              >
+                <ChevronLeft size={16} />
+              </button>
+
+              {/* Page numbers */}
+              {Array.from({ length: totalPages }, (_, i) => i + 1).map((p) => {
+                // Show pages around current
+                if (p === 1 || p === totalPages || (p >= page - 2 && p <= page + 2)) {
+                  return (
+                    <button
+                      key={p}
+                      type="button"
+                      className={`w-8 h-8 rounded text-xs font-semibold flex items-center justify-center transition-colors ${
+                        p === page
+                          ? 'bg-amber-500 text-stone-900'
+                          : 'bg-stone-800 text-stone-300 hover:bg-stone-700'
+                      }`}
+                      onClick={() => handlePageChange(p)}
+                    >
+                      {p}
+                    </button>
+                  )
+                } else if (p === page - 3 || p === page + 3) {
+                  return (
+                    <span key={p} className="px-1 text-stone-600 text-xs">
+                      …
+                    </span>
+                  )
+                }
+                return null
+              })}
+
+              <button
+                type="button"
+                className="btn btn--outline btn--sm p-1.5 disabled:opacity-30 disabled:cursor-not-allowed"
+                disabled={page >= totalPages}
+                onClick={() => handlePageChange(page + 1)}
+                aria-label="Halaman berikutnya"
+              >
+                <ChevronRight size={16} />
+              </button>
+            </div>
+          </nav>
+        )}
+
         {useLocal && (
-          <p className="local-notice">
+          <p className="local-notice mt-6 text-xs text-stone-500 text-center">
             Showing local catalog (server unavailable).{' '}
             <button
               type="button"
-              className="link-btn"
-              onClick={() => { setUseLocal(false); refetch() }}
+              className="link-btn text-amber-500 underline ml-1"
+              onClick={() => {
+                setUseLocal(false)
+                refetch()
+              }}
             >
               Retry server
             </button>
@@ -192,20 +357,22 @@ export default function Catalog({ onNavigate }) {
         )}
       </section>
 
-      {/* Delete confirmation */}
+      {/* Delete / Archive confirmation (Tugas 6) */}
       <ConfirmModal
         open={!!deleteTarget}
-        title="Delete Product"
-        message={`Are you sure you want to delete "${deleteTarget?.name}"? This action cannot be undone.`}
-        confirmLabel="Delete"
+        title="Arsipkan Hardware?"
+        message={`Apakah Anda yakin ingin mengarsipkan "${deleteTarget?.name}"? Katalog ini akan dipindahkan ke tab Arsip dan disembunyikan dari katalog publik.`}
+        confirmLabel="Ya, Arsipkan"
         danger
         loading={deleting}
         onConfirm={handleDelete}
-        onCancel={() => { setDeleteTarget(null); setDeleteError('') }}
+        onCancel={() => {
+          setDeleteTarget(null)
+          setDeleteError('')
+        }}
       />
-      {deleteError && (
-        <div className="toast toast--error">{deleteError}</div>
-      )}
+
+      {deleteError && <div className="toast toast--error">{deleteError}</div>}
     </>
   )
 }

@@ -1,4 +1,16 @@
 import { apiClient, IS_SUPABASE } from '../config/api'
+import { cache } from '../utils/cache'
+import { getUserIdentifier } from './userService'
+
+// ---------------------------------------------------------------------------
+// Share Token Generator (nanoid/UUID-based, unguessable)
+// ---------------------------------------------------------------------------
+export const generateShareToken = () => {
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+    return crypto.randomUUID().replace(/-/g, '').slice(0, 16)
+  }
+  return Math.random().toString(36).substring(2, 10) + Math.random().toString(36).substring(2, 10)
+}
 
 // ---------------------------------------------------------------------------
 // Normalizer — standardizes product shape whether received from Supabase
@@ -36,7 +48,28 @@ export const normalizeProduct = (item) => {
   const stepsList =
     Array.isArray(item.steps) && item.steps.length > 0
       ? item.steps
-      : ['Verify firearm is completely unloaded and point in safe direction.', 'Inspect receiver and mechanism for maintenance.']
+      : [
+          'Verify firearm is completely unloaded and point in safe direction.',
+          'Inspect receiver and mechanism for maintenance.',
+        ]
+
+  // Resolve multi-images
+  let images = []
+  if (Array.isArray(item.catalog_images) && item.catalog_images.length > 0) {
+    images = item.catalog_images
+      .map((img) => (typeof img === 'string' ? { url: img, display_order: 0 } : img))
+      .sort((a, b) => (a.display_order ?? 0) - (b.display_order ?? 0))
+  } else if (Array.isArray(item.images) && item.images.length > 0) {
+    images = item.images.map((img, idx) =>
+      typeof img === 'string' ? { url: img, display_order: idx, is_primary: idx === 0 } : img,
+    )
+  } else if (item.image_url || item.image) {
+    images = [{ url: item.image_url || item.image, display_order: 0, is_primary: true }]
+  } else {
+    images = [{ url: '/guns/pistol.svg', display_order: 0, is_primary: true }]
+  }
+
+  const primaryImage = images.find((i) => i.is_primary)?.url || images[0]?.url || '/guns/pistol.svg'
 
   return {
     ...item,
@@ -47,91 +80,228 @@ export const normalizeProduct = (item) => {
     caliber: item.caliber || 'Standard',
     price: Number(item.price ?? item.cook_time ?? 0),
     description: item.description || '',
-    image_url: item.image_url || item.image || '/guns/pistol.svg',
-    image: item.image_url || item.image || '/guns/pistol.svg',
+    image_url: primaryImage,
+    image: primaryImage,
+    images: images,
     ingredients: specsList,
     steps: stepsList,
+    share_token: item.share_token || `bb_${String(item.id || 'gun')}`,
+    deleted_at: item.deleted_at || null,
+    status: item.status || (item.deleted_at ? 'archived' : 'active'),
+    seller_phone: item.seller_phone || item.contact_phone || '081234567890',
+    user_id: item.user_id || null,
   }
 }
 
 // ---------------------------------------------------------------------------
-// GunService — wraps backend CRUD endpoints.
-// Supports both Supabase PostgREST table (/rest/v1/products) and
-// standard REST API (/api/v1/recipes).
+// GunService — wraps backend CRUD endpoints with soft-delete, pagination,
+// multi-images, share token lookup, and query caching with TTL.
 // ---------------------------------------------------------------------------
 class GunService {
   /**
-   * Fetch a paginated, filterable list of products.
+   * Fetch a paginated, filterable list of active products with server-side pagination & cache.
    */
   async getGuns(params = {}) {
+    const page = Number(params.page) || 1
+    const limit = Number(params.limit) || 12
+    const cacheKey = cache.generateKey('catalog:list', { ...params, page, limit })
+
+    // Check cache
+    const cached = cache.get(cacheKey)
+    if (cached) {
+      return cached
+    }
+
     if (IS_SUPABASE) {
-      const queryParts = ['select=*']
+      try {
+        const queryParts = ['select=*']
 
-      if (params.search) {
-        queryParts.push(`name=ilike.*${encodeURIComponent(params.search)}*`)
-      }
+        // Exclude soft-deleted items unless explicitly requested
+        if (params.archived) {
+          queryParts.push('deleted_at=not.is.null')
+        } else {
+          queryParts.push('deleted_at=is.null')
+        }
 
-      if (params.category && params.category !== 'All') {
-        queryParts.push(`type=eq.${encodeURIComponent(params.category)}`)
-      }
+        if (params.search) {
+          queryParts.push(`name=ilike.*${encodeURIComponent(params.search)}*`)
+        }
 
-      if (params.sort_by) {
-        const order = params.order === 'desc' ? 'desc' : 'asc'
-        queryParts.push(`order=${encodeURIComponent(params.sort_by)}.${order}`)
-      } else {
-        queryParts.push('order=created_at.desc')
-      }
+        if (params.category && params.category !== 'All') {
+          queryParts.push(`type=eq.${encodeURIComponent(params.category)}`)
+        }
 
-      if (params.limit) {
-        queryParts.push(`limit=${params.limit}`)
-      }
+        if (params.sort_by) {
+          const order = params.order === 'desc' ? 'desc' : 'asc'
+          queryParts.push(`order=${encodeURIComponent(params.sort_by)}.${order}`)
+        } else {
+          queryParts.push('order=created_at.desc')
+        }
 
-      const queryString = queryParts.join('&')
-      const data = await apiClient.get(`/rest/v1/products?${queryString}`)
-      const list = Array.isArray(data) ? data.map(normalizeProduct) : []
+        // Count total matching items for server pagination
+        const countParts = [...queryParts.filter((p) => !p.startsWith('order='))]
+        const countData = await apiClient.get(`/rest/v1/products?${countParts.join('&')}`)
+        const total = Array.isArray(countData) ? countData.length : 0
 
-      return {
-        success: true,
-        data: list,
-        pagination: {
-          total: list.length,
-          page: params.page || 1,
-          limit: params.limit || 50,
-        },
+        // Server-side paging with limit & offset
+        const offset = (page - 1) * limit
+        queryParts.push(`limit=${limit}`)
+        queryParts.push(`offset=${offset}`)
+
+        const queryString = queryParts.join('&')
+        const data = await apiClient.get(`/rest/v1/products?${queryString}`)
+        const list = Array.isArray(data) ? data.map(normalizeProduct) : []
+
+        const result = {
+          success: true,
+          data: list,
+          pagination: {
+            total,
+            page,
+            limit,
+            totalPages: Math.ceil(total / limit) || 1,
+            hasNextPage: page * limit < total,
+            hasPrevPage: page > 1,
+          },
+        }
+
+        // Cache for 120s
+        cache.set(cacheKey, result, 120)
+        return result
+      } catch (err) {
+        console.warn('[gunService] Supabase getGuns fallback:', err)
       }
     }
 
-    // Fallback: university REST API
+    // Fallback: university REST API or local
     const clean = Object.fromEntries(
       Object.entries(params).filter(([, v]) => v !== '' && v != null),
     )
-    return apiClient.get('/api/v1/recipes', { params: clean })
+    const res = await apiClient.get('/api/v1/recipes', { params: clean })
+    cache.set(cacheKey, res, 120)
+    return res
   }
 
   /**
-   * Fetch a single product by ID.
+   * Fetch archived (soft-deleted) items for the owner view.
+   */
+  async getArchivedGuns(params = {}) {
+    return this.getGuns({ ...params, archived: true })
+  }
+
+  /**
+   * Fetch a single product by ID (including multi-images from catalog_images).
    */
   async getGunById(id) {
+    const cacheKey = cache.generateKey('gun:detail', id)
+    const cached = cache.get(cacheKey)
+    if (cached) return cached
+
     if (IS_SUPABASE) {
-      const data = await apiClient.get(`/rest/v1/products?id=eq.${id}&select=*`)
+      let data = null
+      try {
+        // Try to fetch product with relation
+        data = await apiClient.get(`/rest/v1/products?id=eq.${id}&select=*,catalog_images(*)`)
+      } catch {
+        // Fallback if relation not available
+        data = await apiClient.get(`/rest/v1/products?id=eq.${id}&select=*`)
+      }
+
       if (Array.isArray(data) && data.length > 0) {
-        return { success: true, data: normalizeProduct(data[0]) }
+        const product = normalizeProduct(data[0])
+
+        // If images weren't joined, try fetching catalog_images separately
+        if (!product.images || product.images.length <= 1) {
+          try {
+            const imgData = await apiClient.get(
+              `/rest/v1/catalog_images?catalog_id=eq.${id}&order=display_order.asc`,
+            )
+            if (Array.isArray(imgData) && imgData.length > 0) {
+              product.images = imgData
+              product.image_url = imgData[0].url
+              product.image = imgData[0].url
+            }
+          } catch {
+            /* ignore if catalog_images table does not exist */
+          }
+        }
+
+        const res = { success: true, data: product }
+        cache.set(cacheKey, res, 120)
+        return res
       }
       throw new Error('Hardware item not found.')
     }
-    return apiClient.get(`/api/v1/recipes/${id}`)
+
+    const res = await apiClient.get(`/api/v1/recipes/${id}`)
+    cache.set(cacheKey, res, 120)
+    return res
+  }
+
+  /**
+   * Fetch product by public share_token.
+   */
+  async getGunByShareToken(token) {
+    if (!token) throw new Error('Invalid share token.')
+    const cacheKey = cache.generateKey('gun:share', token)
+    const cached = cache.get(cacheKey)
+    if (cached) return cached
+
+    if (IS_SUPABASE) {
+      try {
+        let data = await apiClient.get(`/rest/v1/products?share_token=eq.${token}&select=*`)
+        if (Array.isArray(data) && data.length > 0) {
+          const item = data[0]
+          const isArchived = Boolean(item.deleted_at || item.status === 'archived')
+          const product = normalizeProduct(item)
+
+          // Fetch multi-images if any
+          try {
+            const imgData = await apiClient.get(
+              `/rest/v1/catalog_images?catalog_id=eq.${item.id}&order=display_order.asc`,
+            )
+            if (Array.isArray(imgData) && imgData.length > 0) {
+              product.images = imgData
+              product.image_url = imgData[0].url
+            }
+          } catch {
+            /* ignore */
+          }
+
+          const res = { success: true, data: product, isArchived }
+          cache.set(cacheKey, res, 120)
+          return res
+        }
+      } catch (err) {
+        console.warn('Share token lookup error:', err)
+      }
+    }
+
+    throw new Error('Produk tidak ditemukan atau link share tidak valid.')
   }
 
   /**
    * Create a new product.
    */
   async createGun(data) {
+    // Invalidate all catalog & detail caches
+    cache.invalidate('catalog:')
+    cache.invalidate('gun:')
+
     if (IS_SUPABASE) {
       const specsArray = Array.isArray(data.ingredients)
         ? data.ingredients.map((i) => `${i.name}: ${i.quantity}`)
         : Array.isArray(data.specs)
         ? data.specs
         : []
+
+      const shareToken = generateShareToken()
+      const primaryUrl =
+        data.images && data.images.length > 0
+          ? typeof data.images[0] === 'string'
+            ? data.images[0]
+            : data.images[0].url
+          : data.image_url || '/guns/pistol.svg'
 
       const payload = {
         name: data.name,
@@ -140,15 +310,37 @@ class GunService {
         price: Number(data.price ?? data.cook_time ?? 0),
         description: data.description || '',
         specs: specsArray,
-        image_url: data.image_url || null,
+        image_url: primaryUrl,
+        share_token: shareToken,
+        status: data.status || 'active',
+        seller_phone: data.seller_phone || '081234567890',
+        user_id: data.user_id || getUserIdentifier(),
+        deleted_at: null,
       }
 
       const res = await apiClient.post('/rest/v1/products', payload, {
         headers: { Prefer: 'return=representation' },
       })
       const created = Array.isArray(res) ? res[0] : res
+
+      // Insert multi-images to catalog_images table if available
+      if (created?.id && Array.isArray(data.images) && data.images.length > 0) {
+        try {
+          const imageRows = data.images.map((img, idx) => ({
+            catalog_id: created.id,
+            url: typeof img === 'string' ? img : img.url,
+            display_order: idx,
+            is_primary: idx === 0,
+          }))
+          await apiClient.post('/rest/v1/catalog_images', imageRows)
+        } catch (imgErr) {
+          console.warn('Could not save multi-images to catalog_images:', imgErr)
+        }
+      }
+
       return { success: true, data: normalizeProduct(created) }
     }
+
     return apiClient.post('/api/v1/recipes', data)
   }
 
@@ -156,6 +348,9 @@ class GunService {
    * Update existing product.
    */
   async updateGun(id, data) {
+    cache.invalidate('catalog:')
+    cache.invalidate('gun:')
+
     if (IS_SUPABASE) {
       const specsArray = Array.isArray(data.ingredients)
         ? data.ingredients.map((i) => `${i.name}: ${i.quantity}`)
@@ -174,35 +369,111 @@ class GunService {
       }
       if (data.description !== undefined) payload.description = data.description
       if (specsArray !== undefined) payload.specs = specsArray
-      if (data.image_url !== undefined) payload.image_url = data.image_url
+      if (data.seller_phone !== undefined) payload.seller_phone = data.seller_phone
+      if (data.status !== undefined) payload.status = data.status
+
+      if (Array.isArray(data.images) && data.images.length > 0) {
+        const primaryUrl = typeof data.images[0] === 'string' ? data.images[0] : data.images[0].url
+        payload.image_url = primaryUrl
+      } else if (data.image_url !== undefined) {
+        payload.image_url = data.image_url
+      }
 
       const res = await apiClient.patch(`/rest/v1/products?id=eq.${id}`, payload, {
         headers: { Prefer: 'return=representation' },
       })
       const updated = Array.isArray(res) ? res[0] : res
+
+      // Sync multi-images
+      if (Array.isArray(data.images)) {
+        try {
+          // Delete old image rows
+          await apiClient.delete(`/rest/v1/catalog_images?catalog_id=eq.${id}`)
+          // Insert new image rows
+          if (data.images.length > 0) {
+            const imageRows = data.images.map((img, idx) => ({
+              catalog_id: id,
+              url: typeof img === 'string' ? img : img.url,
+              display_order: idx,
+              is_primary: idx === 0,
+            }))
+            await apiClient.post('/rest/v1/catalog_images', imageRows)
+          }
+        } catch (imgErr) {
+          console.warn('Could not sync catalog_images:', imgErr)
+        }
+      }
+
       return { success: true, data: normalizeProduct(updated) }
     }
+
     return apiClient.put(`/api/v1/recipes/${id}`, data)
   }
 
   /**
-   * Partial update (PATCH).
+   * Soft delete (archive) product.
    */
-  async patchGun(id, data) {
+  async deleteGun(id) {
+    cache.invalidate('catalog:')
+    cache.invalidate('gun:')
+
     if (IS_SUPABASE) {
-      return this.updateGun(id, data)
+      // Soft delete: set deleted_at & status=archived
+      await apiClient.patch(
+        `/rest/v1/products?id=eq.${id}`,
+        {
+          deleted_at: new Date().toISOString(),
+          status: 'archived',
+        },
+        { headers: { Prefer: 'return=representation' } },
+      )
+      return { success: true, archived: true }
     }
-    return apiClient.patch(`/api/v1/recipes/${id}`, data)
+
+    return apiClient.delete(`/api/v1/recipes/${id}`)
   }
 
   /**
-   * Delete product.
+   * Restore archived product back to active catalog.
    */
-  async deleteGun(id) {
+  async restoreGun(id) {
+    cache.invalidate('catalog:')
+    cache.invalidate('gun:')
+
     if (IS_SUPABASE) {
+      await apiClient.patch(
+        `/rest/v1/products?id=eq.${id}`,
+        {
+          deleted_at: null,
+          status: 'active',
+          updated_at: new Date().toISOString(),
+        },
+        { headers: { Prefer: 'return=representation' } },
+      )
+      return { success: true }
+    }
+
+    return { success: true }
+  }
+
+  /**
+   * Permanently delete product from database.
+   */
+  async permanentDeleteGun(id) {
+    cache.invalidate('catalog:')
+    cache.invalidate('gun:')
+
+    if (IS_SUPABASE) {
+      // Delete images first if table exists
+      try {
+        await apiClient.delete(`/rest/v1/catalog_images?catalog_id=eq.${id}`)
+      } catch {
+        /* ignore */
+      }
       await apiClient.delete(`/rest/v1/products?id=eq.${id}`)
       return { success: true }
     }
+
     return apiClient.delete(`/api/v1/recipes/${id}`)
   }
 }
